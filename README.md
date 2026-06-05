@@ -21,12 +21,12 @@ The map below demonstrates the dramatic shift from a relatively normal 2023 seas
 ![alt text](output/Zambia_Country/Zambia_2023_2024_Comparison.png)
 2. Historical Burn Analysis (2000–2025)
 This interactive trend analysis plots the National Average against individual district performances. Peaks in the "Count of Extreme Days" (SSI < -1.0) highlight historical "Black Swan" events, essential for underwriters to calculate the Return Period of climate disasters.
-![alt text](https://raw.githubusercontent.com/plotly/datasets/master/images/plotly-dash-logo.png)
 
 (Open the generated Zambia_Drought_Frequency_Animation.html for the full interactive spatiotemporal pulse.)
 
 📖 Scientific Methodology & References
-The mathematical framework of this repository is built upon established climate science and agricultural economics:
+
+The mathematical framework of this study is built upon established climate science and agricultural economics:
 Standardized Soil Moisture Index (SSI): Unlike rainfall, "soil moisture anomalies are more strongly correlated with crop yield fluctuations" (Carrão et al., 2016). This study utilizes a 25-year ERA5-Land climatology to calculate daily Z-scores.
 Risk Window Filtering: Data is strictly filtered for January 1st to April 30th. This covers the vegetative and silking stages where water stress is most lethal to maize (Wang et al., 2024).
 Systemic vs. Idiosyncratic Risk: By plotting district lines against the national mean, we identify Co-variance, a vital metric for international reinsurance and portfolio diversification (Barnett & Mahul, 2007).
