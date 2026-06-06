@@ -11,255 +11,163 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# ==========================================
-# 1. SETUP AND DATA LOADING (FIXED PATHS)
-# ==========================================
+# =============================================================================
+# 1. CONFIGURATION AND BASE PATHS
+# =============================================================================
+BASE_PATH = Path(r"C:\Users\FlawiyaShirishMore\Downloads\Africa-Drought-Study\data")
+OUTPUT_DIR = BASE_PATH / "Master_Analysis_Outputs"
+MASTER_CACHE = BASE_PATH / "master_processed_ssi.csv"
 
-# We use the path where your data actually sits
-base_path = Path(r"C:\Users\FlawiyaShirishMore\Downloads\Africa-Drought-Study\data")
-
-if not base_path.exists():
-    raise FileNotFoundError(f"Data directory not found at: {base_path}")
-
-expected_files = [
-    "master_southern_province_ndvi.csv",
-    "master_southern_province_soil-moisture-layer2.csv",
-    "master_southern_province_lst.csv",
-    "climate_merged.csv",
-    "master_southern_province_data.csv",
-]
-
-missing_files = [f for f in expected_files if not (base_path / f).exists()]
-if missing_files:
-    raise FileNotFoundError(
-        f"Missing required input files in {base_path}:\n" +
-        "\n".join(f"  - {f}" for f in missing_files)
-    )
-
-# Keeping your original output directory logic
-OUTPUT_DIR = base_path / "Week_4_Report_Zambia_South"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+TARGET_DISTRICTS = [
+    'Chirundu', 'Choma', 'Gwembe', 'Kalomo', 'Kazungula', 
+    'Mazabuka', 'Monze', 'Namwala', 'Pemba', 'Siavonga', 
+    'Sinazongwe', 'Zimba'
+]
 
-def load_and_merge_data(path):
-    print("Loading dataframes...")
-    df_ndvi = pd.read_csv(os.path.join(path, "master_southern_province_ndvi.csv"))
-    df_soil = pd.read_csv(os.path.join(path, "master_southern_province_soil-moisture-layer2.csv"))
-    df_lst = pd.read_csv(os.path.join(path, "master_southern_province_lst.csv"))
-    df_climate = pd.read_csv(os.path.join(path, "climate_merged.csv"))
-    df_spei3 = pd.read_csv(os.path.join(path, "master_southern_province_data.csv"))
+# =============================================================================
+# 2. HELPER FUNCTIONS
+# =============================================================================
 
-    # Sequential "Safe Merge" (Your exact logic)
+def get_crop_year(row):
+    return row['date'].year + 1 if row['date'].month in [11, 12] else row['date'].year
+
+def calculate_sheffield_baseline(df, col, window=31):
+    daily_stats = df.groupby(['district', 'day_of_year'])[col].agg(['mean', 'std']).reset_index()
+    results = []
+    for district, group in daily_stats.groupby('district'):
+        group = group.sort_values('day_of_year')
+        triple = pd.concat([group] * 3).reset_index(drop=True)
+        triple['mu_stable'] = triple['mean'].rolling(window=window, center=True).mean()
+        triple['std_stable'] = triple['std'].rolling(window=window, center=True).mean()
+        results.append(triple.iloc[len(group):2*len(group)].copy())
+    return pd.concat(results, ignore_index=True)[['district', 'day_of_year', 'mu_stable', 'std_stable']]
+
+def calculate_neg_integral(series, threshold=-0.8):
+    stress = series[series < threshold]
+    return (stress - threshold).sum() if not stress.empty else 0
+
+# =============================================================================
+# 3. DATA LOADING & SMART PROCESSING
+# =============================================================================
+
+if MASTER_CACHE.exists():
+    print(f"✅ Loading cached processed data: {MASTER_CACHE}")
+    master = pd.read_csv(MASTER_CACHE)
+    master['date'] = pd.to_datetime(master['date'])
+else:
+    print("📂 Processing Raw Files...")
+    df_ndvi = pd.read_csv(BASE_PATH / "master_southern_province_ndvi.csv")
+    df_soil = pd.read_csv(BASE_PATH / "master_southern_province_soil-moisture-layer2.csv")
+    df_lst = pd.read_csv(BASE_PATH / "master_southern_province_lst.csv")
+    df_climate = pd.read_csv(BASE_PATH / "climate_merged.csv")
+    df_spei3 = pd.read_csv(BASE_PATH / "master_southern_province_data.csv")
+
     dataframes = [df_ndvi, df_soil, df_lst, df_climate, df_spei3]
-    master_final = dataframes[0]
-
+    master = dataframes[0]
     for df in dataframes[1:]:
-        if 'district' in df.columns and 'district' in master_final.columns:
+        if 'district' in df.columns:
             keys = ['district', 'date', 'year', 'month', 'day']
-            actual_keys = [k for k in keys if k in df.columns and k in master_final.columns]
-            master_final = pd.merge(master_final, df, on=actual_keys, how='outer')
+            actual_keys = [k for k in keys if k in df.columns and k in master.columns]
+            master = pd.merge(master, df, on=actual_keys, how='outer')
         else:
             cols_to_keep = [c for c in df.columns if c not in ['year', 'month', 'day', 'district']]
-            master_final = pd.merge(master_final, df[cols_to_keep], on='date', how='left')
+            master = pd.merge(master, df[cols_to_keep], on='date', how='left')
 
-    # Data Clean-up
-    master_final.replace(-999, np.nan, inplace=True)
-    if 'soil_moisture_layer2' in master_final.columns:
-        master_final = master_final.rename(columns={'soil_moisture_layer2': 'soil_moisture_7_28'})
+    master.replace(-999, np.nan, inplace=True)
+    master['date'] = pd.to_datetime(master['date'])
+    master['day_of_year'] = master['date'].dt.dayofyear
     
-    return master_final, df_climate
+    if 'soil_moisture_layer2' in master.columns:
+        master = master.rename(columns={'soil_moisture_layer2': 'soil_moisture_7_28'})
 
-master_final, df_climate = load_and_merge_data(base_path)
+    # GAP FILLING
+    sat_cols = ['ndvi', 'lst_celsius']
+    master[sat_cols] = master.groupby('district')[sat_cols].apply(lambda x: x.interpolate(method='linear', limit_direction='both', limit=30)).reset_index(level=0, drop=True)
+    lst_clim = master.groupby(['district', 'day_of_year'])['lst_celsius'].transform('mean')
+    master['lst_celsius'] = master['lst_celsius'].fillna(lst_clim)
 
-# ==========================================
-# 2. TEMPORAL RECONSTRUCTION (GAP FILLING)
-# ==========================================
+    # CALCULATIONS
+    ssi_base = calculate_sheffield_baseline(master, 'soil_moisture_7_28')
+    master = master.merge(ssi_base, on=['district', 'day_of_year'], how='left')
+    master['SSI'] = (master['soil_moisture_7_28'] - master['mu_stable']) / (master['std_stable'] + 1e-6)
 
-def clean_and_fill_data(df):
-    print("Processing temporal gaps and LST reconstruction...")
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values(['district', 'date'])
+    master['D'] = master['precip_mm'].clip(lower=0) - master['pet_mm'].abs()
+    master['D_90'] = master.groupby('district')['D'].transform(lambda x: x.rolling(90, min_periods=28).sum())
+    spei_base = calculate_sheffield_baseline(master, 'D_90').rename(columns={'mu_stable':'mu_d90', 'std_stable':'std_d90'})
+    master = master.merge(spei_base, on=['district', 'day_of_year'], how='left')
+    master['SPEI3'] = (master['D_90'] - master['mu_d90']) / (master['std_d90'] + 1e-6)
 
-    # Step 1: Climate Indices (Monthly to Daily)
-    climate_cols = ['NAO', 'DMI', 'NINO34', 'TSA', 'EA']
-    df[climate_cols] = df.groupby('district')[climate_cols].ffill()
+    master['VCI_z'] = master.groupby(['district', 'day_of_year'])['ndvi'].transform(lambda x: (x - x.mean()) / (x.std() + 1e-6))
+    master['TCI_z'] = master.groupby(['district', 'day_of_year'])['lst_celsius'].transform(lambda x: (x.mean() - x) / (x.std() + 1e-6))
+    master['VHI'] = (0.5 * master['VCI_z']) + (0.5 * master['TCI_z'])
 
-    # Step 2: Vegetation and LST (Satellite Gaps)
-    sat_cols = ['ndvi', 'ndvi_raw', 'evi', 'evi_raw', 'lst_celsius']
-    df[sat_cols] = df.groupby('district')[sat_cols].apply(
-        lambda x: x.interpolate(method='linear', limit_direction='both', limit=30)
-    ).reset_index(level=0, drop=True)
+    for col in ['SSI', 'SPEI3', 'VHI']:
+        master[col] = master.groupby('district')[col].transform(lambda x: x.rolling(7, center=True, min_periods=1).mean())
 
-    # Step 3: Soil Moisture & Climate (Reanalysis)
-    daily_cols = ['soil_moisture_7_28', 'pet_mm', 'precip_mm']
-    df[daily_cols] = df.groupby('district')[daily_cols].apply(
-        lambda x: x.interpolate(method='linear', limit=7)
-    ).reset_index(level=0, drop=True)
+    master.to_csv(MASTER_CACHE, index=False)
 
-    # Step 4: LST Climatological Reanalysis
-    df['day_of_year'] = df['date'].dt.dayofyear
-    lst_climatology = df.groupby(['district', 'day_of_year'])['lst_celsius'].transform('mean')
-    df['lst_celsius'] = df['lst_celsius'].fillna(lst_climatology)
+# =============================================================================
+# 4. SEASONAL AGGREGATION
+# =============================================================================
+master['crop_year'] = master.apply(get_crop_year, axis=1)
+master_crop = master[master['date'].dt.month.isin([11, 12, 1, 2, 3, 4, 5, 6, 7, 8])].copy()
+master_crop.loc[master_crop['crop_year'] == 2024, 'NINO34'] = 2.03
+
+df_seasonal = master_crop.groupby(['district', 'crop_year']).agg({
+    'SSI': ['mean', calculate_neg_integral], 'VHI': 'mean', 'SPEI3': 'mean',
+    'ndvi': 'mean', 'precip_mm': 'sum', 'NINO34': 'mean'
+}).reset_index()
+df_seasonal.columns = ['district', 'crop_year', 'SSI_seasonal', 'Drought_Energy', 'VHI_seasonal', 'SPEI3_seasonal', 'NDVI_seasonal', 'Total_Precip', 'NINO34']
+
+# =============================================================================
+# 5. GENERATING OUTPUTS (BOSS-READY COLORS)
+# =============================================================================
+
+# 1. DROUGHT CASCADE 2024 (ORIGINAL COLORS RESTORED)
+print("📊 Rendering Spatiotemporal Drought Cascade (2024)...")
+df_2024 = master_crop[master_crop['crop_year'] == 2024].copy()
+df_prov_avg = df_2024.groupby('date').mean(numeric_only=True).reset_index()
+
+fig_casc = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.07,
+                    subplot_titles=("1. Meteorological: Daily Rainfall vs. Evaporation (PET)", 
+                                    "2. Hydrological: Daily SSI (Julian-Day Baseline)", 
+                                    "3. Cumulative: SPEI-3 (90-Day Anomaly)", 
+                                    "4. Biological: Vegetation Health Index (VHI)"))
+
+# Row 1: Rain/PET
+fig_casc.add_trace(go.Bar(x=df_prov_avg['date'], y=df_prov_avg['precip_mm'], name="Avg Rain", marker_color='dodgerblue'), row=1, col=1)
+fig_casc.add_trace(go.Scatter(x=df_prov_avg['date'], y=df_prov_avg['pet_mm'].abs(), name="Avg PET", line=dict(color='crimson', width=2)), row=1, col=1)
+
+# Row 2 & 3: Red/Blue Anomalies
+for r, col in [(2, 'SSI'), (3, 'SPEI3')]:
+    for d in TARGET_DISTRICTS:
+        if d in df_2024['district'].values:
+            df_d = df_2024[df_2024['district'] == d]
+            fig_casc.add_trace(go.Scatter(x=df_d['date'], y=df_d[col], line=dict(color='rgba(150,150,150,0.12)', width=1), showlegend=False), row=r, col=1)
     
-    # Fallback to monthly
-    lst_monthly_climatology = df.groupby(['district', 'month'])['lst_celsius'].transform('mean')
-    df['lst_celsius'] = df['lst_celsius'].fillna(lst_monthly_climatology)
+    fig_casc.add_trace(go.Scatter(x=df_prov_avg['date'], y=df_prov_avg[col].clip(lower=0), fill='tozeroy', fillcolor='rgba(0, 0, 255, 0.2)', line_color='blue', name=f"Prov {col} (Wet)"), row=r, col=1)
+    fig_casc.add_trace(go.Scatter(x=df_prov_avg['date'], y=df_prov_avg[col].clip(upper=0), fill='tozeroy', fillcolor='rgba(255, 0, 0, 0.2)', line_color='red', name=f"Prov {col} (Dry)"), row=r, col=1)
+    fig_casc.add_hline(y=-1.2, line_dash="dash", line_color="darkred", annotation_text="Extreme Drought", row=r, col=1)
 
-    # Final Filter
-    df.dropna(subset=['ndvi', 'soil_moisture_7_28'], inplace=True)
-    return df
+# Row 4: Biological VHI
+fig_casc.add_trace(go.Scatter(x=df_prov_avg['date'], y=df_prov_avg['VHI'], line=dict(color='darkgreen', width=3), name="Avg VHI"), row=4, col=1)
+fig_casc.update_layout(height=1200, title_text="Southern Province: Spatiotemporal Drought Analysis (2024)", template="plotly_white")
+fig_casc.write_html(OUTPUT_DIR / "Drought_Cascade_2024.html")
 
-master_final = clean_and_fill_data(master_final)
+# 2. HISTORICAL SSI MATRIX
+plt.figure(figsize=(15, 9))
+pivot_ssi = df_seasonal.pivot(index='crop_year', columns='district', values='SSI_seasonal')
+sns.heatmap(pivot_ssi[pivot_ssi.index >= 2001], cmap='RdBu', center=0, annot=True, fmt=".1f", linewidths=.5)
+plt.title("Southern Province: Historical Drought Matrix (Nov-Aug)")
+plt.savefig(OUTPUT_DIR / "Historical_SSI_Matrix.png")
 
-# ==========================================
-# 3. DROUGHT INDEX CALCULATIONS
-# ==========================================
+# 3. INTERACTIVE VERIFICATION
+df_seasonal['SEASON'] = (df_seasonal['crop_year'] - 1).astype(str) + "-" + df_seasonal['crop_year'].astype(str)
+fig_verif = px.line(df_seasonal, x="SEASON", y="SSI_seasonal", color="district", title="District Drought Verification (SSI)")
+for yr in df_seasonal[df_seasonal['NINO34'] >= 1.0]['SEASON'].unique():
+    fig_verif.add_vrect(x0=yr, x1=yr, fillcolor="red", opacity=0.1, layer="below", line_width=0)
+fig_verif.write_html(OUTPUT_DIR / "Interactive_SSI_Verification.html")
 
-def calculate_indices(df):
-    print("Calculating SSI, VHI, and SPEI3...")
-    # SSI
-    df['SSI'] = df.groupby(['district', 'month'])['soil_moisture_7_28'].transform(
-        lambda x: (x - x.mean()) / (x.std() + 1e-6)
-    )
-
-    # VHI (Your exact 0.5/0.5 blend)
-    stats = df.groupby('district').agg({
-        'ndvi': ['min', 'max'],
-        'lst_celsius': ['min', 'max']
-    })
-    stats.columns = ['n_min', 'n_max', 'l_min', 'l_max']
-    df = df.join(stats, on='district')
-    
-    df['VCI'] = (df['ndvi'] - df['n_min']) / (df['n_max'] - df['n_min'] + 1e-6)
-    df['TCI'] = (df['l_max'] - df['lst_celsius']) / (df['l_max'] - df['l_min'] + 1e-6)
-    df['VHI'] = 0.5 * df['VCI'] + 0.5 * df['TCI']
-    df = df.drop(columns=['n_min', 'n_max', 'l_min', 'l_max'])
-
-    # SPEI-3
-    df['D'] = df['precip_mm'] + df['pet_mm']
-    df['D3'] = df.groupby('district')['D'].transform(
-        lambda x: x.rolling(window=90, min_periods=30).sum()
-    )
-    df['SPEI3'] = df.groupby(['district', 'month'])['D3'].transform(
-        lambda x: (x - x.mean()) / (x.std() + 1e-6)
-    )
-    return df
-
-master_final = calculate_indices(master_final)
-
-# ==========================================
-# 4. SEASONAL AGGREGATION (CROP YEAR)
-# ==========================================
-
-# Define Crop Year
-master_final['CropYear'] = np.where(master_final['month'] >= 11, master_final['year'] + 1, master_final['year'])
-
-# Filter for Maize Season (Nov-April) - Your exact months
-maize_season_months = [11, 12, 1, 2, 3, 4]
-df_maize_season = master_final[master_final['month'].isin(maize_season_months)].copy()
-
-agg_columns = {
-    'SSI': 'mean', 'VHI': 'mean', 'SPEI3': 'mean', 'ndvi': 'mean',
-    'soil_moisture_7_28': 'mean', 'lst_celsius': 'mean',
-    'precip_mm': 'sum', 'pet_mm': 'sum'
-}
-
-df_seasonal_agg = df_maize_season.groupby(['district', 'CropYear']).agg(agg_columns).reset_index()
-df_seasonal_agg.columns = [
-    'district', 'CropYear', 'SSI_seasonal', 'VHI_seasonal', 'SPEI3_seasonal', 
-    'NDVI_seasonal', 'SoilMoist_7_28_seasonal', 'LST_seasonal', 'Total_Precip', 'Total_PET'
-]
-df_seasonal_agg['province'] = 'Southern'
-
-# Prepare NINO34 data (Nov-Apr)
-df_climate['date'] = pd.to_datetime(df_climate['date'])
-df_climate['month'] = df_climate['date'].dt.month
-df_climate['year'] = df_climate['date'].dt.year
-df_climate['CropYear'] = np.where(df_climate['month'] >= 11, df_climate['year'] + 1, df_climate['year'])
-nino_seasonal = df_climate[df_climate['month'].isin(maize_season_months)].groupby('CropYear')['NINO34'].mean().reset_index()
-nino_seasonal.loc[nino_seasonal['CropYear'] == 2024, 'NINO34'] = 2.03
-
-# ==========================================
-# 5. VISUALIZATIONS
-# ==========================================
-
-def plot_district_verification(df, nino_df, metric='SSI_seasonal'):
-    print(f"Generating Plotly verification for {metric}...")
-    data = df.copy()
-    data['SEASON'] = (data['CropYear'] - 1).astype(str) + "-" + data['CropYear'].astype(str)
-    data = pd.merge(data, nino_df[['CropYear', 'NINO34']], on='CropYear', how='left')
-    
-    fig = px.line(data, x="SEASON", y=metric, color="district",
-                  title=f"Southern Province: District {metric} Verification")
-
-    enso_events = data[['SEASON', 'NINO34']].drop_duplicates()
-    for _, row in enso_events.iterrows():
-        if pd.isna(row['NINO34']): continue
-        if row['NINO34'] >= 0.5:
-            fig.add_vrect(x0=row['SEASON'], x1=row['SEASON'], fillcolor="red", opacity=0.1, layer="below", line_width=0)
-        elif row['NINO34'] <= -0.5:
-            fig.add_vrect(x0=row['SEASON'], x1=row['SEASON'], fillcolor="blue", opacity=0.1, layer="below", line_width=0)
-    
-    fig.update_layout(template="plotly_white", hovermode="x unified")
-    fig.write_html(OUTPUT_DIR / f"Southern_Province_{metric}_Verification.html")
-
-# Generate plots
-plot_district_verification(df_seasonal_agg, nino_seasonal, 'SSI_seasonal')
-plot_district_verification(df_seasonal_agg, nino_seasonal, 'VHI_seasonal')
-
-# ==========================================
-# 6. CORRELATION ANALYSIS
-# ==========================================
-
-def generate_correlation_matrix(df, nino_df):
-    print("Generating correlation heatmaps...")
-    nino_temp = nino_df.rename(columns={'NINO34': 'nino34'})
-    data = pd.merge(df, nino_temp[['CropYear', 'nino34']], on='CropYear', how='left')
-    
-    corr_cols = ['nino34', 'SSI_seasonal', 'NDVI_seasonal', 'SoilMoist_7_28_seasonal', 'VHI_seasonal', 'SPEI3_seasonal']
-    corr_matrix = data[data['province'] == 'Southern'][corr_cols].corr()
-
-    plt.figure(figsize=(11, 9))
-    sns.heatmap(corr_matrix, annot=True, cmap='RdYlGn', center=0, fmt='.2f', linewidths=0.5)
-    plt.title("Southern Province: Teleconnection & Index Correlation")
-    plt.savefig(OUTPUT_DIR / "Southern_Province_NINO_Correlation_Matrix.png")
-
-generate_correlation_matrix(df_seasonal_agg, nino_seasonal)
-
-# ==========================================
-# 7. FINAL STYLIZED REPORT (HTML)
-# ==========================================
-
-def save_styled_report(df, nino_df):
-    print("Saving final validation report...")
-    report_prov = df.groupby('CropYear').agg({
-        'NDVI_seasonal': 'mean', 'Total_Precip': 'mean', 'SSI_seasonal': 'mean'
-    }).reset_index()
-    
-    report_prov = pd.merge(report_prov, nino_df, on='CropYear', how='left')
-    avg_ndvi = report_prov['NDVI_seasonal'].mean()
-    avg_precip = report_prov['Total_Precip'].mean()
-    
-    report_prov['NDVI Anomaly (%)'] = ((report_prov['NDVI_seasonal'] - avg_ndvi) / avg_ndvi * 100)
-    report_prov['Rain Anomaly (%)'] = ((report_prov['Total_Precip'] - avg_precip) / avg_precip * 100)
-    report_prov['Season'] = (report_prov['CropYear'] - 1).astype(str) + "-" + report_prov['CropYear'].astype(str)
-    
-    report_df = report_prov[['Season', 'NINO34', 'NDVI_seasonal', 'NDVI Anomaly (%)', 'Total_Precip', 'Rain Anomaly (%)']].copy()
-    report_df.columns = ['Season', 'NINO34 Index', 'Mean NDVI', 'NDVI Anomaly (%)', 'Total Rain (mm)', 'Rain Anomaly (%)']
-
-    def get_impact_label(row):
-        if row['NINO34 Index'] >= 1.0 and row['NDVI Anomaly (%)'] < -5: return "⚠️ Severe El Niño Drought"
-        elif row['NINO34 Index'] >= 0.5: return "🔸 Mild El Niño Impact"
-        elif row['NINO34 Index'] <= -0.5: return "🔹 La Niña (Wet)"
-        else: return "✅ Neutral/Normal"
-
-    report_df['Climate Status'] = report_df.apply(get_impact_label, axis=1)
-    
-    # Save HTML
-    html_out = report_df.to_html()
-    with open(OUTPUT_DIR / "Southern_Province_Validation_Report_Basic.html", "w", encoding="utf-8") as f:
-        f.write(html_out)
-
-save_styled_report(df_seasonal_agg, nino_seasonal)
-
-print("--- PROCESS COMPLETE ---")
+print(f"✨ DONE! Results saved in: {OUTPUT_DIR}")
