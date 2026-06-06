@@ -1,0 +1,5 @@
+Threshold,Avg_Correlation,Count,Coverage_Loss_%,Statistical_Reliability
+0%,0.5008149019263985,70,0.0,Low
+10%,0.6732164807061513,33,52.9,High
+20%,0.6581211431905563,19,72.9,High
+30%,0.600507422301419,9,87.1,Moderate
